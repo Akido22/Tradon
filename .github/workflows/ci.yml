@@ -28,5 +28,15 @@ jobs:
       - name: Install dependencies
         run: pip install -e ".[dev,web,telegram,ml]"
 
+      # data/ isn't committed (it's gitignored — it's the local SQLite
+      # file, not source), so a fresh checkout has no DB and no schema.
+      # README's own setup instructions have the same step; mirroring it
+      # here is what actually exercises the migrations too, not just a
+      # test-fixture workaround.
+      - name: Apply database migrations
+        run: |
+          mkdir -p data
+          alembic upgrade head
+
       - name: Run tests
         run: pytest -q
