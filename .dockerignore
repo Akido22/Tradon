@@ -1,0 +1,14 @@
+.venv/
+.git/
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.ruff_cache/
+data/
+models/
+.env
+*.log
+tests/
+.claude/
+tradon_test_report_01.md

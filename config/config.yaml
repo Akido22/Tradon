@@ -1,0 +1,73 @@
+# Non-secret app configuration (see ARCHITECTURE.md §2 Этап 1).
+# Secrets (API keys, DB URL) live in .env — see .env.example.
+
+# bybit needs no API key for public market data, so this works out of the
+# box. For Forex, use metatrader (needs a running, logged-in MT5 terminal
+# — see ARCHITECTURE.md/README) with --provider metatrader. iTick was
+# dropped as a provider — its free-tier key access stopped working and
+# wasn't worth maintaining around; see README for the removal note.
+provider: bybit
+timeframe: "1h"
+
+# Default instruments — override per-run with `tradon run --symbols BTCUSDT,ETHUSDT`.
+instruments:
+  - BTCUSDT
+  - ETHUSDT
+
+strategies:
+  - name: sma_cross
+    enabled: true
+    params:
+      fast_period: 10
+      slow_period: 30
+  - name: rsi
+    enabled: true
+    params:
+      period: 14
+      oversold: 30
+      overbought: 70
+  - name: macd
+    enabled: false
+    params:
+      fast_period: 12
+      slow_period: 26
+      signal_period: 9
+  - name: bollinger
+    enabled: false
+    params:
+      period: 20
+      std_dev: 2
+  - name: atr_breakout
+    enabled: false
+    params:
+      channel_period: 20
+      atr_period: 14
+      atr_multiplier: 1
+  - name: ichimoku
+    enabled: false
+    params:
+      tenkan_period: 9
+      kijun_period: 26
+      senkou_b_period: 52
+      displacement: 26
+  - name: ml
+    enabled: false
+    params:
+      model_path: "models/btcusdt_1h.joblib"  # train with `tradon train-model` first
+      long_threshold: 0.55
+      short_threshold: 0.45
+
+signal_engine:
+  min_confirmations: 1
+  confirmation_window_minutes: 5
+
+# RiskManager suggestions attached to live signals (§3.4) — illustrative
+# sizing against a hypothetical balance, not a real broker account. Same
+# defaults as RiskManager() itself; override here if you want different ones.
+risk:
+  account_balance: 10000
+  risk_per_trade: 0.01
+  atr_multiplier: 1.5
+  reward_risk_ratio: 2
+
+poll_interval_seconds: 60

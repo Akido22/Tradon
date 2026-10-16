@@ -1,0 +1,48 @@
+services:
+  # Web dashboard + its own live signal monitoring (see web/app.py's
+  # lifespan) — started by default. Needs .env (copy from .env.example)
+  # and config/config.yaml for instruments/strategies/provider.
+  web:
+    build: .
+    ports:
+      - "8000:8000"
+    env_file: .env
+    environment:
+      # Loopback-only would make the published port unreachable from
+      # outside the container — see config.py's web_host docstring.
+      - WEB_HOST=0.0.0.0
+    volumes:
+      - ./data:/app/data
+      - ./config:/app/config
+    restart: unless-stopped
+
+  # Telegram bot — runs its own separate live session, so it and `web`
+  # each poll/stream and write signals independently if both are up.
+  # Optional: `docker compose --profile telegram up`.
+  telegram:
+    build: .
+    command: tradon-telegram
+    env_file: .env
+    volumes:
+      - ./data:/app/data
+      - ./config:/app/config
+    restart: unless-stopped
+    profiles: ["telegram"]
+
+  # Optional Postgres instead of the SQLite default (see README "Database
+  # setup") — set DATABASE_URL in .env to point at it, nothing else
+  # changes. Not started unless you ask for it.
+  db:
+    image: postgres:16
+    environment:
+      POSTGRES_DB: trading_bot
+      POSTGRES_USER: bot
+      POSTGRES_PASSWORD: bot
+    ports:
+      - "5432:5432"
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+    profiles: ["postgres"]
+
+volumes:
+  pgdata:

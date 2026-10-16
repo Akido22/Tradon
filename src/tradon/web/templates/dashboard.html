@@ -1,0 +1,124 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Tradon</title>
+<script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
+<style>
+  body { font-family: system-ui, sans-serif; background: #0b0e14; color: #e6e6e6; margin: 0; }
+  header { display: flex; align-items: center; gap: 16px; padding: 12px 20px; background: #151a24; border-bottom: 1px solid #232a38; }
+  header h1 { font-size: 1rem; margin: 0; font-weight: 600; }
+  .pill { font-size: 0.8rem; color: #9aa4b2; background: #0b0e14; border: 1px solid #232a38; border-radius: 999px; padding: 3px 10px; }
+  .spacer { flex: 1; }
+  select, button { background: #0b0e14; color: #e6e6e6; border: 1px solid #2a3240; border-radius: 4px; padding: 5px 8px; }
+  button { cursor: pointer; }
+  main { padding: 20px; display: flex; flex-direction: column; gap: 20px; }
+  #chart { height: 260px; border: 1px solid #232a38; border-radius: 6px; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+  th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid #1c222e; }
+  th { color: #9aa4b2; font-weight: 500; }
+  .long { color: #3ec48a; }
+  .short { color: #e0724f; }
+  #status { font-size: 0.8rem; color: #9aa4b2; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Tradon</h1>
+  <a href="/portfolio" style="color:#9aa4b2;text-decoration:none;font-size:0.85rem;">Portfolio</a>
+  <span class="pill">{{ provider }}</span>
+  <span class="pill">{{ timeframe }}</span>
+  <span class="pill" id="mode">mode: …</span>
+  <span class="pill" id="status">connecting…</span>
+  <div class="spacer"></div>
+  <span class="pill">{{ user }}</span>
+  <form method="post" action="/logout"><button type="submit">Sign out</button></form>
+</header>
+<main>
+  <div>
+    <label for="chart-symbol">Chart</label>
+    <select id="chart-symbol">
+      {% for symbol in instruments %}<option value="{{ symbol }}">{{ symbol }}</option>{% endfor %}
+    </select>
+    <div id="chart"></div>
+  </div>
+  <div>
+    <table>
+      <thead>
+        <tr><th>Time</th><th>Symbol</th><th>Strategy</th><th>Direction</th><th>Strength</th><th>Size</th><th>Stop</th><th>Target</th><th>Reason</th></tr>
+      </thead>
+      <tbody id="signals-body"></tbody>
+    </table>
+  </div>
+</main>
+<script>
+const signalsBody = document.getElementById('signals-body');
+const statusPill = document.getElementById('status');
+
+function fmt(n, digits) {
+  return n === null || n === undefined ? 'n/a' : Number(n).toFixed(digits);
+}
+
+function addRow(sig, atTop) {
+  const row = document.createElement('tr');
+  const time = new Date(sig.timestamp).toLocaleTimeString();
+  row.innerHTML = `
+    <td>${time}</td>
+    <td>${sig.symbol}</td>
+    <td>${sig.strategy}</td>
+    <td class="${sig.direction}">${sig.direction.toUpperCase()}</td>
+    <td>${fmt(sig.strength, 2)}</td>
+    <td>${fmt(sig.size, 4)}</td>
+    <td>${fmt(sig.stop_loss, 5)}</td>
+    <td>${fmt(sig.take_profit, 5)}</td>
+    <td>${sig.reason ?? ''}</td>`;
+  if (atTop) {
+    signalsBody.insertBefore(row, signalsBody.firstChild);
+  } else {
+    signalsBody.appendChild(row);
+  }
+}
+
+fetch('/api/signals?limit=50')
+  .then(r => r.json())
+  .then(rows => rows.forEach(sig => addRow(sig, false)));
+
+const modePill = document.getElementById('mode');
+const modeLabels = { starting: 'connecting…', realtime: 'realtime', poll: 'polling', idle: 'idle' };
+function refreshMode() {
+  fetch('/api/status').then(r => r.json()).then(s => { modePill.textContent = modeLabels[s.mode] ?? s.mode; });
+}
+refreshMode();
+setInterval(refreshMode, 3000);
+
+const wsProtocol = location.protocol === 'https:' ? 'wss:' : 'ws:';
+const ws = new WebSocket(`${wsProtocol}//${location.host}/ws/signals`);
+ws.onopen = () => { statusPill.textContent = 'live'; };
+ws.onclose = () => { statusPill.textContent = 'disconnected'; };
+ws.onmessage = (event) => {
+  const msg = JSON.parse(event.data);
+  if (msg.type === 'signal') addRow(msg, true);
+  if (msg.type === 'error') statusPill.textContent = 'poll error';
+};
+
+const chartEl = document.getElementById('chart');
+const chart = LightweightCharts.createChart(chartEl, {
+  layout: { background: { color: '#0b0e14' }, textColor: '#9aa4b2' },
+  grid: { vertLines: { color: '#1c222e' }, horzLines: { color: '#1c222e' } },
+  timeScale: { timeVisible: true },
+});
+const series = chart.addCandlestickSeries({ upColor: '#3ec48a', downColor: '#e0724f', borderVisible: false, wickUpColor: '#3ec48a', wickDownColor: '#e0724f' });
+new ResizeObserver(entries => chart.applyOptions({ width: entries[0].contentRect.width })).observe(chartEl);
+
+function loadChart(symbol) {
+  fetch(`/api/candles/${symbol}?limit=200`)
+    .then(r => r.json())
+    .then(data => series.setData(data));
+}
+
+const chartSelect = document.getElementById('chart-symbol');
+chartSelect.addEventListener('change', () => loadChart(chartSelect.value));
+if (chartSelect.value) loadChart(chartSelect.value);
+</script>
+</body>
+</html>

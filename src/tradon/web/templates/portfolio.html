@@ -1,0 +1,211 @@
+<!doctype html>
+<html>
+<head>
+<meta charset="utf-8">
+<title>Tradon — Portfolio</title>
+<script src="https://unpkg.com/lightweight-charts@4.1.3/dist/lightweight-charts.standalone.production.js"></script>
+<style>
+  body { font-family: system-ui, sans-serif; background: #0b0e14; color: #e6e6e6; margin: 0; }
+  header { display: flex; align-items: center; gap: 16px; padding: 12px 20px; background: #151a24; border-bottom: 1px solid #232a38; }
+  header h1 { font-size: 1rem; margin: 0; font-weight: 600; }
+  header a { color: #9aa4b2; text-decoration: none; font-size: 0.85rem; }
+  header a:hover { color: #e6e6e6; }
+  .spacer { flex: 1; }
+  main { padding: 20px; display: flex; flex-direction: column; gap: 20px; max-width: 1000px; }
+  fieldset { border: 1px solid #232a38; border-radius: 8px; padding: 14px 16px; }
+  legend { color: #9aa4b2; font-size: 0.85rem; padding: 0 6px; }
+  .checks { display: flex; flex-wrap: wrap; gap: 4px 16px; }
+  label.check { display: flex; align-items: center; gap: 6px; font-size: 0.9rem; }
+  .row { display: flex; gap: 20px; align-items: end; flex-wrap: wrap; margin-top: 14px; }
+  .field { display: flex; flex-direction: column; gap: 4px; }
+  .field label { font-size: 0.8rem; color: #9aa4b2; }
+  input[type=number] { background: #0b0e14; color: #e6e6e6; border: 1px solid #2a3240; border-radius: 4px; padding: 6px 8px; width: 110px; }
+  button { background: #2e7d5b; color: white; border: 0; border-radius: 4px; padding: 8px 16px; font-weight: 600; cursor: pointer; }
+  button:disabled { opacity: 0.5; cursor: default; }
+  #error { color: #e05252; font-size: 0.85rem; }
+  .stats { display: grid; grid-template-columns: repeat(auto-fit, minmax(140px, 1fr)); gap: 12px; }
+  .stat { background: #151a24; border-radius: 8px; padding: 12px 14px; }
+  .stat .label { font-size: 0.75rem; color: #9aa4b2; }
+  .stat .value { font-size: 1.3rem; font-weight: 600; margin-top: 4px; }
+  .pos { color: #3ec48a; }
+  .neg { color: #e0724f; }
+  #equity-chart { height: 240px; border: 1px solid #232a38; border-radius: 6px; }
+  table { width: 100%; border-collapse: collapse; font-size: 0.85rem; }
+  th, td { text-align: left; padding: 6px 10px; border-bottom: 1px solid #1c222e; }
+  th { color: #9aa4b2; font-weight: 500; }
+  #results { display: none; flex-direction: column; gap: 20px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Tradon</h1>
+  <a href="/">Dashboard</a>
+  <a href="/portfolio">Portfolio</a>
+  <div class="spacer"></div>
+  <span>{{ user }}</span>
+</header>
+<main>
+  <fieldset>
+    <legend>Symbols</legend>
+    <div class="checks" id="symbols">
+      {% for symbol in instruments %}
+      <label class="check"><input type="checkbox" value="{{ symbol }}" checked> {{ symbol }}</label>
+      {% endfor %}
+    </div>
+  </fieldset>
+  <fieldset>
+    <legend>Strategies</legend>
+    <div class="checks" id="strategies">
+      {% for strategy in strategies %}
+      <label class="check"><input type="checkbox" value="{{ strategy }}" checked> {{ strategy }}</label>
+      {% endfor %}
+    </div>
+  </fieldset>
+  <div class="row">
+    <div class="field"><label>Timeframe</label><input type="text" id="timeframe" value="{{ timeframe }}" style="width:70px"></div>
+    <div class="field"><label>Candles</label><input type="number" id="limit" value="1000" min="50" max="5000"></div>
+    <div class="field"><label>Balance (per combo)</label><input type="number" id="balance" value="10000" min="100"></div>
+    <button id="run">Run backtest</button>
+    <span id="error"></span>
+  </div>
+
+  <div id="results">
+    <div class="stats" id="stats"></div>
+    <div id="equity-chart"></div>
+    <table id="combo-table">
+      <thead><tr><th>Symbol</th><th>Strategy</th><th>Trades</th><th>Win rate</th><th>Profit factor</th><th>PnL</th></tr></thead>
+      <tbody></tbody>
+    </table>
+    <div>
+      <div style="font-size:0.85rem;color:#9aa4b2;margin-bottom:6px;">Price correlation (close-to-close returns)</div>
+      <table id="correlation-table"><thead><tr id="correlation-head"></tr></thead><tbody></tbody></table>
+      <div style="font-size:0.75rem;color:#9aa4b2;margin-top:6px;">
+        Near +1 = moves together (running the same directional strategy on both isn't real diversification);
+        near -1 = moves opposite; near 0 = unrelated.
+      </div>
+    </div>
+  </div>
+</main>
+<script>
+function fmt(n, digits) { return n === null || n === undefined ? 'n/a' : Number(n).toFixed(digits); }
+function pct(n) { return n === null || n === undefined ? 'n/a' : (n * 100).toFixed(1) + '%'; }
+function pnlClass(n) { return n >= 0 ? 'pos' : 'neg'; }
+
+// Created lazily on first render, not at page load — the #results
+// container (and #equity-chart inside it) starts at display:none / zero
+// size, and lightweight-charts can't size itself against that.
+let chart = null;
+let equitySeries = null;
+
+function ensureChart() {
+  if (chart) return;
+  const chartEl = document.getElementById('equity-chart');
+  chart = LightweightCharts.createChart(chartEl, {
+    width: chartEl.clientWidth,
+    layout: { background: { color: '#0b0e14' }, textColor: '#9aa4b2' },
+    grid: { vertLines: { color: '#1c222e' }, horzLines: { color: '#1c222e' } },
+    timeScale: { timeVisible: true },
+  });
+  equitySeries = chart.addLineSeries({ color: '#3ec48a', lineWidth: 2 });
+  new ResizeObserver(entries => chart.applyOptions({ width: entries[0].contentRect.width })).observe(chartEl);
+}
+
+function checkedValues(containerId) {
+  return Array.from(document.querySelectorAll(`#${containerId} input:checked`)).map(el => el.value);
+}
+
+document.getElementById('run').addEventListener('click', async () => {
+  const errorEl = document.getElementById('error');
+  const runButton = document.getElementById('run');
+  errorEl.textContent = '';
+  const symbols = checkedValues('symbols');
+  const strategies = checkedValues('strategies');
+  if (!symbols.length || !strategies.length) {
+    errorEl.textContent = 'Pick at least one symbol and one strategy.';
+    return;
+  }
+
+  runButton.disabled = true;
+  runButton.textContent = 'Running…';
+  try {
+    const resp = await fetch('/api/portfolio-backtest', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({
+        symbols, strategies,
+        timeframe: document.getElementById('timeframe').value,
+        limit: Number(document.getElementById('limit').value),
+        balance: Number(document.getElementById('balance').value),
+      }),
+    });
+    if (!resp.ok) {
+      const body = await resp.json().catch(() => ({}));
+      throw new Error(body.detail || `HTTP ${resp.status}`);
+    }
+    const data = await resp.json();
+    renderResults(data);
+  } catch (err) {
+    errorEl.textContent = err.message;
+  } finally {
+    runButton.disabled = false;
+    runButton.textContent = 'Run backtest';
+  }
+});
+
+function renderResults(data) {
+  const c = data.combined;
+  document.getElementById('results').style.display = 'flex';
+  ensureChart();
+
+  const stats = [
+    ['Total PnL', `${c.total_pnl >= 0 ? '+' : ''}${fmt(c.total_pnl, 2)}`, pnlClass(c.total_pnl)],
+    ['Win rate', pct(c.win_rate), ''],
+    ['Profit factor', fmt(c.profit_factor, 2), ''],
+    ['Sharpe ratio', fmt(c.sharpe_ratio, 2), ''],
+    ['Sortino ratio', fmt(c.sortino_ratio, 2), ''],
+    ['Max drawdown', pct(c.max_drawdown), ''],
+    ['Trades', `${c.wins}W / ${c.losses}L`, ''],
+    ['Ending balance', fmt(c.ending_balance, 2), ''],
+  ];
+  document.getElementById('stats').innerHTML = stats.map(([label, value, cls]) => `
+    <div class="stat"><div class="label">${label}</div><div class="value ${cls}">${value}</div></div>
+  `).join('');
+
+  // Different symbol/strategy combos can close trades on the same candle
+  // boundary — lightweight-charts requires unique, ascending times, so keep
+  // only the last (i.e. fully cumulative) equity value per timestamp.
+  const byTime = new Map();
+  for (const p of c.equity_curve) byTime.set(p.time, p.equity);
+  equitySeries.setData(Array.from(byTime, ([time, value]) => ({ time, value })));
+
+  const tbody = document.querySelector('#combo-table tbody');
+  tbody.innerHTML = data.per_combo.map(r => `
+    <tr>
+      <td>${r.symbol}</td>
+      <td>${r.strategy}</td>
+      <td>${r.trades}</td>
+      <td>${pct(r.win_rate)}</td>
+      <td>${fmt(r.profit_factor, 2)}</td>
+      <td class="${pnlClass(r.pnl)}">${r.pnl >= 0 ? '+' : ''}${fmt(r.pnl, 2)}</td>
+    </tr>
+  `).join('');
+
+  renderCorrelation(data.correlation);
+}
+
+function renderCorrelation(correlation) {
+  const symbols = Object.keys(correlation || {});
+  document.getElementById('correlation-head').innerHTML =
+    ['<th></th>', ...symbols.map(s => `<th>${s}</th>`)].join('');
+  document.querySelector('#correlation-table tbody').innerHTML = symbols.map(rowSymbol => {
+    const cells = symbols.map(colSymbol => {
+      const value = correlation[rowSymbol]?.[colSymbol];
+      const cls = value === undefined ? '' : (value >= 0 ? 'pos' : 'neg');
+      return `<td class="${cls}">${value === undefined ? 'n/a' : (value >= 0 ? '+' : '') + fmt(value, 2)}</td>`;
+    }).join('');
+    return `<tr><th>${rowSymbol}</th>${cells}</tr>`;
+  }).join('');
+}
+</script>
+</body>
+</html>

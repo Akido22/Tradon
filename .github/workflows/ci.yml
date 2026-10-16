@@ -1,0 +1,32 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.11", "3.13"]
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python ${{ matrix.python-version }}
+        uses: actions/setup-python@v5
+        with:
+          python-version: ${{ matrix.python-version }}
+          cache: pip
+
+      # web/telegram are imported directly by their test modules (no
+      # try/except guard like metatrader's), so they're required, not
+      # optional, for the suite to even collect. gui (PySide6) and
+      # metatrader (Windows-only, needs a running MT5 terminal) aren't
+      # imported by any test and are skipped here on purpose.
+      - name: Install dependencies
+        run: pip install -e ".[dev,web,telegram,ml]"
+
+      - name: Run tests
+        run: pytest -q
