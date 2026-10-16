@@ -6,8 +6,11 @@ __pycache__/
 .pytest_cache/
 .ruff_cache/
 *.log
-data/
-models/
+# Anchored to repo root (leading /) — unanchored "data/"/"models/" would
+# also match src/tradon/data/ (the real Data Layer source package) and
+# any future src/.../models/, silently dropping them from version control.
+/data/
+/models/
 
 # Claude Code's own local machine/session state — not shared project config.
 .claude/settings.local.json
