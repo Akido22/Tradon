@@ -27,7 +27,7 @@ strategies:
       oversold: 30
       overbought: 70
   - name: macd
-    enabled: false
+    enabled: true
     params:
       fast_period: 12
       slow_period: 26

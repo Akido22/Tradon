@@ -424,6 +424,30 @@ it's never seen, train on an older slice and hand-verify against a
 strictly newer one (there's no CLI flag for this yet — `get_ohlcv` has no
 date-range parameter, only `limit`).
 
+**Portfolio simulation with ML as one of the combos**: `tradon backtest`
+already treats `ml` as just another strategy name, so `--strategy
+sma_cross,rsi,ml` runs it alongside indicator strategies in the same
+shared-capital `simulate_portfolio()` — no special-casing needed. The
+catch is the same in-sample leakage trap above, just easier to miss in a
+multi-combo table: a single `tradon backtest --limit 1500` call trains and
+tests `ml` on the same recent window, so its row can look the best of the
+bunch purely from leakage (confirmed live: BTCUSDT/ml showed PF 1.88,
++4462 PnL in-sample — the GUI/CLI currently has no way to split train vs.
+test within one `backtest` call, so a number like that from `backtest`
+alone should not be trusted). A proper out-of-sample portfolio run (train
+`ml` only on the first 70% of history, then run all three strategies
+together on the strictly-later 30% only) against real Bybit BTCUSDT/ETHUSDT
+1h data gave a much less flattering, more honest picture: ML's test
+accuracy exactly matched the majority-class baseline (60.6%), and the
+combined shared-capital portfolio (sma_cross + rsi + ml, both symbols) lost
+money out-of-sample — PnL -320.85 on a 10000 balance, Sharpe -7.94, max
+drawdown 3.9%. Net takeaway: mixing `ml` into a portfolio backtest doesn't
+by itself fix the strategy's weak out-of-sample edge (see the walk-forward
+note above) — it just adds more combos competing for the same shared
+capital. Nothing here changed the engine (`simulate_portfolio`/`run_portfolio`
+already supported this); this section exists so the leakage trap doesn't
+get rediscovered the hard way in this specific combo.
+
 ## Tests
 
 ```bash
