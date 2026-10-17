@@ -334,17 +334,28 @@ real ML deployment uses.
 .venv/Scripts/tradon train-model --symbol BTCUSDT --provider binance --timeframe 1h --limit 3000 --horizon 5 --model-path models/btcusdt_1h.joblib
 ```
 
-This fits a gradient-boosted classifier on engineered features (RSI, MACD
-histogram, SMA ratio, ATR%, Bollinger-band position, short-term returns —
-see `tradon/ml/features.py`) to predict whether price will be higher
-`--horizon` bars ahead, using a **chronological** train/test split (the
-most recent `--test-fraction` held out, never shuffled in — shuffling
-would let the model train on data from after the point it's graded on,
-which is look-ahead bias in disguise). It prints train/test accuracy next
-to the test period's majority-class baseline — if test accuracy doesn't
-beat that baseline, the model has no real edge on this data and printing
-a warning says so; don't enable it for trading just because a number came
-out.
+> The feature set grew from 8 to 14 features (added volume/volatility/
+> time-of-day). A `.joblib` saved before that change was fit on a
+> shorter vector — loading it and calling `predict_proba()` with 14
+> features will error or silently misbehave. Retrain, don't reuse an old
+> model file across a feature-set change.
+
+This fits a gradient-boosted classifier on 14 engineered features (RSI,
+MACD histogram, SMA ratio, ATR%, Bollinger-band position, short-term
+returns, volume ratio, realized volatility, and cyclical hour-of-day/
+day-of-week encodings — see `tradon/ml/features.py`) to predict whether
+price will be higher `--horizon` bars ahead, using a **chronological**
+train/test split (the most recent `--test-fraction` held out, never
+shuffled in — shuffling would let the model train on data from after the
+point it's graded on, which is look-ahead bias in disguise). It prints
+train/test accuracy next to the test period's majority-class baseline —
+if test accuracy doesn't beat that baseline, the model has no real edge
+on this data and printing a warning says so; don't enable it for trading
+just because a number came out. It also prints a feature-importance
+table (`GradientBoostingClassifier.feature_importances_`) so the model
+isn't a complete black box — if `hour_sin`/`dow_sin` dominate instead of
+`rsi_14`/`macd_hist`, that's a very different (and much more suspect)
+model than one actually driven by market structure.
 
 **Multiple symbols**: pass a comma-separated `--symbol` list
 (`--symbol BTCUSDT,ETHUSDT`) to pool their history into one dataset, so
@@ -374,9 +385,29 @@ To actually use a trained model, add it to `config.yaml`'s strategies list:
 
 `long_threshold`/`short_threshold` are the P(price higher) cutoffs that
 turn a probability into a LONG/SHORT signal — between them, no signal.
-`optimize-params`/`walk-forward` don't support `ml` (its real
-hyperparameters require retraining, which doesn't fit the same
-grid-search loop as an indicator's params) — tune thresholds by hand via
+`optimize-params`/`walk-forward` (the indicator-strategy commands) don't
+support `ml` — its real hyperparameters require retraining, which doesn't
+fit the same grid-search loop as an indicator's params — but `ml` has its
+own equivalent:
+
+**ML walk-forward validation**: `train-model`'s single static split can
+look fine without holding up once periodically refit on fresh data — the
+scenario live trading would actually put it through. `ml-walk-forward`
+splits history into consecutive folds and, for each one, retrains from
+scratch on everything before it, then trades only that fold's model on
+the fold after (data it never saw during that fold's training), chaining
+balance across folds the same way the indicator `walk-forward` command
+does:
+
+```bash
+.venv/Scripts/tradon ml-walk-forward --symbol BTCUSDT --provider binance --timeframe 1h --limit 3000 --horizon 5 --splits 5
+```
+
+Confirmed live against real Bybit history: a model whose single static
+split looked fine (53.0% test accuracy vs. 50.4% baseline) fell apart
+under walk-forward — only 1 of 4 retrained folds beat its own baseline,
+and the chained out-of-sample result was a loss (Sharpe -4.41). That gap
+is exactly what this command exists to catch; tune thresholds by hand via
 `tradon backtest --strategy ml`, or retrain with a different `--horizon`.
 
 **Watch out for in-sample leakage when backtesting it manually.**

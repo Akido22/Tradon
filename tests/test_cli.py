@@ -182,4 +182,44 @@ def test_train_model_requires_ml_extra_or_runs(fake_provider, tmp_path) -> None:
 
     assert result.exit_code == 0, result.output
     assert "ML model" in result.output
+    assert "Feature importance" in result.output
     assert (tmp_path / "model.joblib").exists()
+
+
+def test_ml_walk_forward_runs_without_crashing(fake_provider) -> None:
+    pytest.importorskip("sklearn")
+    pytest.importorskip("joblib")
+
+    result = runner.invoke(
+        app,
+        [
+            "ml-walk-forward",
+            "--symbol",
+            SYMBOL,
+            "--provider",
+            "fake",
+            "--limit",
+            "300",
+            "--splits",
+            "3",
+        ],
+    )
+
+    assert result.exit_code == 0, result.output
+    # FakeProvider only ever returns ~300 candles regardless of --limit, so
+    # whether that's enough for any fold to actually train is incidental —
+    # what matters here is the command wires up and renders either outcome
+    # cleanly, not a raw traceback.
+    assert "ML walk-forward" in result.output or "No fold had enough data" in result.output
+
+
+def test_ml_walk_forward_rejects_too_few_splits(fake_provider) -> None:
+    pytest.importorskip("sklearn")
+    pytest.importorskip("joblib")
+
+    result = runner.invoke(
+        app, ["ml-walk-forward", "--symbol", SYMBOL, "--provider", "fake", "--splits", "1"]
+    )
+
+    assert result.exit_code != 0
+    assert "at least 2" in result.output

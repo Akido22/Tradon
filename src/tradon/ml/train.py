@@ -10,6 +10,8 @@ ML deployment uses.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from datetime import datetime
+from decimal import Decimal
 from pathlib import Path
 from typing import Any
 
@@ -17,8 +19,11 @@ import joblib
 from sklearn.ensemble import GradientBoostingClassifier
 from sklearn.metrics import accuracy_score
 
+from tradon.backtest import BacktestResult, run_backtest
 from tradon.data.base import Candle
-from tradon.ml.features import MIN_CANDLES, extract_features
+from tradon.ml.features import FEATURE_NAMES, MIN_CANDLES, extract_features
+from tradon.risk.manager import RiskManager
+from tradon.strategy.base import Signal, Strategy
 
 
 @dataclass(frozen=True, slots=True)
@@ -31,6 +36,11 @@ class TrainingReport:
     # that can't beat this has learned nothing the class balance didn't
     # already give it for free.
     test_baseline_accuracy: float
+    # (feature name, importance) pairs, sorted highest first. Makes the
+    # model at least partly inspectable instead of a pure black box — if
+    # "hour_sin"/"dow_sin" dominate, that's a very different (and much
+    # more suspect) model than one driven by rsi_14/macd_hist.
+    feature_importances: tuple[tuple[str, float], ...]
 
 
 def build_dataset(candles: list[Candle], horizon: int) -> tuple[list[list[float]], list[int]]:
@@ -120,14 +130,128 @@ def train_model_multi(
     test_accuracy = accuracy_score(y_test, model.predict(x_test))
     majority_class = max(set(y_test), key=y_test.count)
     baseline_accuracy = y_test.count(majority_class) / len(y_test)
+    importances = sorted(
+        zip(FEATURE_NAMES, (float(v) for v in model.feature_importances_), strict=True),
+        key=lambda pair: pair[1],
+        reverse=True,
+    )
 
     report = TrainingReport(
         samples=total_samples,
         train_accuracy=train_accuracy,
         test_accuracy=test_accuracy,
         test_baseline_accuracy=baseline_accuracy,
+        feature_importances=tuple(importances),
     )
     return model, report
+
+
+class _WalkForwardMLStrategy(Strategy):
+    """Wraps an in-memory, already-fitted model as a Strategy so each
+    walk-forward fold can be traded through the exact same run_backtest()
+    every indicator strategy uses — MLStrategy itself only knows how to
+    load a model from a saved path, not hold one that was just fit.
+    """
+
+    name = "ml"
+
+    def __init__(self, model: Any, up_index: int, long_threshold: float, short_threshold: float) -> None:
+        super().__init__({})
+        self._model = model
+        self._up_index = up_index
+        self._long_threshold = long_threshold
+        self._short_threshold = short_threshold
+
+    def on_candles(self, candles: list[Candle]) -> Signal | None:
+        from tradon.strategy.plugins.ml_strategy import predict_signal
+
+        return predict_signal(self._model, self._up_index, self._long_threshold, self._short_threshold, candles)
+
+
+@dataclass(frozen=True, slots=True)
+class MLWalkForwardFold:
+    train_start: datetime
+    train_end: datetime
+    test_start: datetime
+    test_end: datetime
+    training_report: TrainingReport
+    out_of_sample: BacktestResult
+
+
+def walk_forward_train(
+    candles: list[Candle],
+    horizon: int = 5,
+    n_splits: int = 5,
+    long_threshold: float = 0.55,
+    short_threshold: float = 0.45,
+    starting_balance: Decimal = Decimal(10000),
+    risk_manager: RiskManager | None = None,
+) -> list[MLWalkForwardFold]:
+    """ML's analogue of tradon.backtest.walk_forward(): optimize-params and
+    a single static train_model() call share the same flaw — both grade a
+    choice (params, or a fitted model) on the very data used to make that
+    choice, which overstates how it would do going forward. This instead
+    splits `candles` into `n_splits` consecutive folds and, for each one,
+    RETRAINS from scratch on everything before it, then trades only that
+    model on the fold after (data it never saw during training) — chaining
+    balance across folds (see walk_forward_summary() in backtest.py for
+    why that's valid here: the test windows are consecutive and
+    non-overlapping by construction). A model that looked great in
+    train_model()'s single static split can still fall apart here if it
+    doesn't hold up when periodically refit on fresh data, which is
+    exactly the scenario live trading would actually put it through.
+    """
+    from tradon.strategy.plugins.ml_strategy import model_up_index
+
+    if n_splits < 2:
+        raise ValueError("walk_forward_train needs at least 2 splits (1 train, 1 test)")
+    risk_manager = risk_manager or RiskManager()
+    boundaries = [round(len(candles) * k / n_splits) for k in range(n_splits + 1)]
+
+    folds: list[MLWalkForwardFold] = []
+    balance = starting_balance
+    for i in range(n_splits - 1):
+        train_candles = candles[boundaries[0] : boundaries[i + 1]]
+        test_candles = candles[boundaries[i + 1] : boundaries[i + 2]]
+        if len(test_candles) < 2:
+            continue
+
+        try:
+            model, report = train_model(train_candles, horizon=horizon, test_fraction=0.2)
+        except ValueError:
+            # Not enough/varied-enough data in this fold's training window
+            # yet (common for the earliest folds) — skip it, not fatal.
+            continue
+
+        strategy = _WalkForwardMLStrategy(model, model_up_index(model), long_threshold, short_threshold)
+        out_of_sample = run_backtest(test_candles, strategy, risk_manager, balance)
+        folds.append(
+            MLWalkForwardFold(
+                train_start=train_candles[0].timestamp,
+                train_end=train_candles[-1].timestamp,
+                test_start=test_candles[0].timestamp,
+                test_end=test_candles[-1].timestamp,
+                training_report=report,
+                out_of_sample=out_of_sample,
+            )
+        )
+        balance = out_of_sample.ending_balance
+
+    return folds
+
+
+def walk_forward_train_summary(folds: list[MLWalkForwardFold]) -> BacktestResult:
+    """Chain every fold's out-of-sample trading result into one equity
+    curve — same reasoning as backtest.py's walk_forward_summary().
+    """
+    if not folds:
+        return BacktestResult()
+    trades = [t for fold in folds for t in fold.out_of_sample.trades]
+    return BacktestResult(
+        trades=trades,
+        starting_balance=folds[0].out_of_sample.starting_balance,
+        ending_balance=folds[-1].out_of_sample.ending_balance,
+    )
 
 
 def save_model(model: Any, path: str) -> None:

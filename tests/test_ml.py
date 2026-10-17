@@ -17,7 +17,15 @@ pytest.importorskip("joblib")
 
 from tradon.data.base import Candle  # noqa: E402
 from tradon.ml.features import FEATURE_NAMES, MIN_CANDLES, extract_features  # noqa: E402
-from tradon.ml.train import build_dataset, load_model, save_model, train_model, train_model_multi  # noqa: E402
+from tradon.ml.train import (  # noqa: E402
+    build_dataset,
+    load_model,
+    save_model,
+    train_model,
+    train_model_multi,
+    walk_forward_train,
+    walk_forward_train_summary,
+)
 from tradon.strategy.plugins.ml_strategy import MLStrategy  # noqa: E402
 
 
@@ -78,6 +86,19 @@ def test_extract_features_returns_one_value_per_feature_name() -> None:
     assert features is not None
     assert len(features) == len(FEATURE_NAMES)
     assert all(isinstance(v, float) for v in features)
+
+
+def test_feature_names_include_volume_volatility_and_time_features() -> None:
+    assert {"volume_ratio", "volatility_20", "hour_sin", "hour_cos", "dow_sin", "dow_cos"} <= set(FEATURE_NAMES)
+
+
+def test_extract_features_cyclical_time_encoding_is_bounded() -> None:
+    candles = make_candles(make_oscillating_closes(MIN_CANDLES + 5))
+    features = extract_features(candles)
+    assert features is not None
+    by_name = dict(zip(FEATURE_NAMES, features, strict=True))
+    for name in ("hour_sin", "hour_cos", "dow_sin", "dow_cos"):
+        assert -1.0 <= by_name[name] <= 1.0
 
 
 def test_build_dataset_label_matches_future_direction() -> None:
@@ -188,6 +209,63 @@ def test_ml_strategy_returns_none_before_warmup(tmp_path) -> None:
 
     strategy = MLStrategy({"model_path": model_path})
     assert strategy.on_candles(candles[: MIN_CANDLES - 1]) is None
+
+
+def test_training_report_feature_importances_cover_every_feature() -> None:
+    closes = make_cyclical_closes(n_cycles=20, half_len=15)
+    candles = make_candles(closes)
+
+    _model, report = train_model(candles, horizon=5, test_fraction=0.2)
+
+    assert {name for name, _ in report.feature_importances} == set(FEATURE_NAMES)
+    assert len(report.feature_importances) == len(FEATURE_NAMES)
+    total = sum(importance for _, importance in report.feature_importances)
+    assert total == pytest.approx(1.0, abs=1e-6)
+    # Sorted highest first.
+    importances = [importance for _, importance in report.feature_importances]
+    assert importances == sorted(importances, reverse=True)
+
+
+def make_long_cyclical_candles(n_cycles: int = 60, half_len: int = 15, step: float = 1.0) -> list[Candle]:
+    return make_candles(make_cyclical_closes(n_cycles=n_cycles, half_len=half_len, step=step))
+
+
+def test_walk_forward_train_tests_only_on_data_after_its_own_training_window() -> None:
+    candles = make_long_cyclical_candles()  # 1800 bars
+
+    folds = walk_forward_train(candles, horizon=5, n_splits=4)
+
+    assert len(folds) == 3  # n_splits - 1
+    for fold in folds:
+        assert fold.train_end < fold.test_start
+        assert fold.training_report.samples > 0
+
+
+def test_walk_forward_train_compounds_balance_across_folds() -> None:
+    candles = make_long_cyclical_candles()
+
+    folds = walk_forward_train(candles, horizon=5, n_splits=4, starting_balance=Decimal(10000))
+
+    assert folds[0].out_of_sample.starting_balance == Decimal(10000)
+    for prev, nxt in zip(folds, folds[1:]):
+        assert nxt.out_of_sample.starting_balance == prev.out_of_sample.ending_balance
+
+    summary = walk_forward_train_summary(folds)
+    assert summary.starting_balance == folds[0].out_of_sample.starting_balance
+    assert summary.ending_balance == folds[-1].out_of_sample.ending_balance
+    assert summary.total_trades == sum(f.out_of_sample.total_trades for f in folds)
+
+
+def test_walk_forward_train_requires_at_least_two_splits() -> None:
+    candles = make_long_cyclical_candles()
+    with pytest.raises(ValueError):
+        walk_forward_train(candles, horizon=5, n_splits=1)
+
+
+def test_walk_forward_train_summary_of_no_folds_is_empty_result() -> None:
+    result = walk_forward_train_summary([])
+    assert result.total_trades == 0
+    assert result.starting_balance == Decimal(0)
 
 
 def test_save_and_load_model_round_trip(tmp_path) -> None:

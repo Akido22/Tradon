@@ -498,6 +498,14 @@ async def _train_model(
     table.add_row("Test accuracy (out-of-sample)", f"{report.test_accuracy:.1%}")
     table.add_row("Test baseline (majority class)", f"{report.test_baseline_accuracy:.1%}")
     console.print(table)
+
+    importance_table = Table(title="Feature importance")
+    importance_table.add_column("Feature")
+    importance_table.add_column("Importance")
+    for feature_name, importance in report.feature_importances:
+        importance_table.add_row(feature_name, f"{importance:.3f}")
+    console.print(importance_table)
+
     console.print(f"[green]Saved to {model_path}[/green]")
 
     if report.test_accuracy <= report.test_baseline_accuracy:
@@ -509,6 +517,103 @@ async def _train_model(
     console.print(
         "[dim]To use it, add to config.yaml's strategies list: name: ml, params: {model_path: "
         f'"{model_path}", long_threshold: 0.55, short_threshold: 0.45}}[/dim]'
+    )
+
+
+@app.command("ml-walk-forward")
+def ml_walk_forward_cmd(
+    symbol: str = typer.Option(..., "--symbol", help="Symbol to validate, e.g. BTCUSDT"),
+    provider: str = typer.Option(None, "--provider", help="Data source — overrides config.yaml provider"),
+    timeframe: str = typer.Option(None, "--timeframe", help="Overrides config.yaml timeframe"),
+    limit: int = typer.Option(3000, "--limit", help="How many historical candles to fetch — split into folds, so more is better"),
+    horizon: int = typer.Option(5, "--horizon", help="Bars ahead to predict, same meaning as train-model"),
+    splits: int = typer.Option(5, "--splits", help="Consecutive windows (>=2); each fold retrains from scratch on everything before it"),
+    long_threshold: float = typer.Option(0.55, "--long-threshold"),
+    short_threshold: float = typer.Option(0.45, "--short-threshold"),
+    balance: float = typer.Option(10000, "--balance", help="Starting account balance"),
+) -> None:
+    """Walk-forward validation for the ml strategy: train_model shows one
+    static train/test split, which can look great without holding up once
+    periodically refit on fresh data — the scenario live trading would
+    actually put it through. This retrains per fold on data before it,
+    trades only on the fold after (never seen during that fold's
+    training), and chains the folds into one real equity curve. Requires
+    the `ml` extra: `pip install -e .[ml]`.
+    """
+    asyncio.run(
+        _ml_walk_forward(symbol, provider, timeframe, limit, horizon, splits, long_threshold, short_threshold, balance)
+    )
+
+
+async def _ml_walk_forward(
+    symbol: str,
+    provider_name: str | None,
+    timeframe: str | None,
+    limit: int,
+    horizon: int,
+    splits: int,
+    long_threshold: float,
+    short_threshold: float,
+    balance: float,
+) -> None:
+    try:
+        from tradon.ml.train import walk_forward_train, walk_forward_train_summary
+    except ImportError as exc:
+        raise typer.BadParameter("ML support isn't installed — run `pip install -e .[ml]` first") from exc
+    if splits < 2:
+        raise typer.BadParameter("--splits must be at least 2 (1 train, 1 test)")
+
+    cfg = load_runtime_config()
+    if provider_name:
+        if provider_name not in PROVIDERS:
+            raise typer.BadParameter(f"Unknown provider {provider_name!r} — choices: {', '.join(PROVIDERS)}")
+        cfg.provider_name = provider_name
+    provider = build_provider(cfg)
+    timeframe = timeframe or cfg.timeframe
+    symbol = normalize_symbol(cfg.provider_name, symbol)
+
+    console.print(f"[dim]Fetching {limit} {timeframe} candles for {symbol} from {provider.name}...[/dim]")
+    try:
+        candles = await provider.get_ohlcv(symbol, timeframe, limit=limit)
+    except NotImplementedError as exc:
+        raise typer.BadParameter(f"{provider.name} isn't wired up yet: {exc}") from exc
+    except Exception as exc:  # noqa: BLE001 - surfaced as a clean message, not a raw traceback
+        raise typer.BadParameter(f"Could not fetch {symbol} from {provider.name}: {describe_error(exc)}") from exc
+
+    try:
+        folds = walk_forward_train(
+            candles,
+            horizon=horizon,
+            n_splits=splits,
+            long_threshold=long_threshold,
+            short_threshold=short_threshold,
+            starting_balance=Decimal(str(balance)),
+        )
+    except ValueError as exc:
+        raise typer.BadParameter(str(exc)) from exc
+    if not folds:
+        console.print("[red]No fold had enough data to train on — try fewer --splits or a higher --limit.[/red]")
+        return
+
+    table = Table(title=f"ML walk-forward — {symbol} / {timeframe} ({len(folds)} folds)")
+    for column in ("Test window", "Train acc.", "Test acc. (fold)", "Baseline (fold)", "Out-of-sample trades", "Out-of-sample PnL"):
+        table.add_column(column)
+    for fold in folds:
+        report = fold.training_report
+        table.add_row(
+            f"{fold.test_start:%Y-%m-%d} → {fold.test_end:%Y-%m-%d}",
+            f"{report.train_accuracy:.1%}",
+            f"{report.test_accuracy:.1%}",
+            f"{report.test_baseline_accuracy:.1%}",
+            str(fold.out_of_sample.total_trades),
+            f"{fold.out_of_sample.total_pnl:+.2f}",
+        )
+    console.print(table)
+    _render_backtest_metrics("Out-of-sample (chained across folds)", walk_forward_train_summary(folds))
+    console.print(
+        "[dim]'Test acc. (fold)' is each retrain's own internal held-out accuracy — the honest number is "
+        "the chained out-of-sample trading result above, which trades each fold's model on data from "
+        "strictly after its own training window.[/dim]"
     )
 
 
