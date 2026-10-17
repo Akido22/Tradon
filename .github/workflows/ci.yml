@@ -20,13 +20,22 @@ jobs:
           python-version: ${{ matrix.python-version }}
           cache: pip
 
-      # web/telegram are imported directly by their test modules (no
+      # web/telegram/gui are imported directly by their test modules (no
       # try/except guard like metatrader's), so they're required, not
-      # optional, for the suite to even collect. gui (PySide6) and
-      # metatrader (Windows-only, needs a running MT5 terminal) aren't
-      # imported by any test and are skipped here on purpose.
+      # optional, for the suite to even collect. metatrader (Windows-only,
+      # needs a running MT5 terminal) isn't imported by any test and is
+      # skipped here on purpose.
       - name: Install dependencies
-        run: pip install -e ".[dev,web,telegram,ml]"
+        run: pip install -e ".[dev,web,telegram,ml,gui]"
+
+      # PySide6's "offscreen" platform plugin (QT_QPA_PLATFORM below) still
+      # needs these system libraries even headless — a bare ubuntu-latest
+      # runner doesn't ship them by default.
+      - name: Install Qt runtime libraries for offscreen rendering
+        run: |
+          sudo apt-get update
+          sudo apt-get install -y --no-install-recommends \
+            libegl1 libgl1 libxkbcommon0 libdbus-1-3 libfontconfig1 libfreetype6
 
       # data/ isn't committed (it's gitignored — it's the local SQLite
       # file, not source), so a fresh checkout has no DB and no schema.
@@ -39,4 +48,6 @@ jobs:
           alembic upgrade head
 
       - name: Run tests
+        env:
+          QT_QPA_PLATFORM: offscreen
         run: pytest -q

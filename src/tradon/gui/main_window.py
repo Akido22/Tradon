@@ -79,7 +79,7 @@ _STRATEGY_PARAM_SPECS: dict[str, list[tuple[str, int, int, int]]] = {
 
 
 class MainWindow(QMainWindow):
-    def __init__(self) -> None:
+    def __init__(self, settings: QSettings | None = None) -> None:
         super().__init__()
         self.setWindowTitle("Tradon")
         self.resize(900, 560)
@@ -90,7 +90,12 @@ class MainWindow(QMainWindow):
         self._instrument_boxes: dict[str, QCheckBox] = {}
         self._strategy_boxes: dict[str, QCheckBox] = {}
         self._strategy_params: dict[str, dict] = self._initial_strategy_params()
-        self._settings = QSettings("Tradon", "Tradon")
+        # Overridable so tests can point this at an isolated scope instead
+        # of this machine's real saved GUI preferences (checked
+        # instruments, provider choice, strategy params) — reading or,
+        # worse, clearing the real ones as a side effect of running the
+        # test suite would be a bug in the tests, not a thing to work around.
+        self._settings = settings if settings is not None else QSettings("Tradon", "Tradon")
 
         self._build_ui()
         self._restore_settings()

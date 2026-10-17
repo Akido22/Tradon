@@ -399,6 +399,24 @@ date-range parameter, only `limit`).
 .venv/Scripts/pytest
 ```
 
+Covers the core (`backtest.py`/`runtime.py`/`ml`) plus all three
+presentation layers against a shared `FakeProvider` test double (see
+conftest.py) — no network calls, no real exchange/broker involved:
+- `test_cli.py` — real Typer command invocations (`symbols`, `run`,
+  `backtest`, `optimize-params`, `walk-forward`, `train-model`), including
+  error paths (unknown provider/strategy, unsupported symbol)
+- `test_web_app.py` — a real FastAPI `TestClient` against the actual app
+  (auth flow, session cookies, every `/api/*` endpoint, portfolio
+  backtest)
+- `test_gui.py` — optional (`pip install -e ".[gui]"`), builds `MainWindow`
+  offscreen (`QT_QPA_PLATFORM=offscreen`) and exercises its synchronous
+  methods directly (chart rendering, instrument/strategy checkboxes,
+  provider switching). Deliberately does **not** drive the full async
+  start/stop monitoring flow — doing that inside an automated offscreen
+  test hit asyncio task re-entrancy errors specific to the test harness
+  during manual exploration, and a flaky GUI test is worse than a
+  narrower one that's actually reliable in CI.
+
 ## Notes
 
 - **iTick was removed as a provider.** ARCHITECTURE.md originally called
