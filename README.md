@@ -144,6 +144,41 @@ correlated near +1 carry largely the same risk twice over, so running the
 same directional strategy on both isn't real diversification even though
 it looks like two positions.
 
+## Provider fallback (optional)
+
+`config.yaml`'s `fallback_providers` list (empty by default) lets a REST
+call that fails on the primary provider (`provider:`) transparently retry
+the next one in the list instead of failing the whole poll cycle /
+backtest / warm-up:
+
+```yaml
+provider: bybit
+fallback_providers:
+  - binance
+```
+
+Built as `FallbackProvider` (`tradon/data/fallback.py`) and wired into
+`build_provider()` — every presentation layer (CLI, GUI, Web, Telegram)
+gets it automatically since they all build their provider through that
+one function, no per-layer changes needed. It remembers which provider
+last worked so later calls try that one first instead of always retrying
+a known-dead provider before falling through again. Confirmed live: with
+a stubbed Bybit provider forced to raise `ConnectionError` and Binance as
+the fallback, `get_ohlcv("BTCUSDT", "1h")` still returned real candles,
+sourced from Binance, and the provider's `.name` reported `binance`
+afterward.
+
+This only helps when the fallback provider actually serves the same
+symbol — it's meaningful for crypto pairs that exist on both Binance and
+Bybit, not for a Forex symbol that's only available via MetaTrader.
+`subscribe_realtime` (the WebSocket path) is **not** wrapped by this —
+`LiveSession` already falls back from realtime to REST polling per
+provider on its own (see "Realtime vs polling" below); switching
+providers mid-stream would mean re-warming history from a different
+source, which isn't something `LiveSession` does today. So this covers
+the poll-mode REST path, backtests, and the initial history warm-up, not
+a dropped realtime connection.
+
 ## Realtime vs polling
 
 `LiveSession` (used by CLI/GUI/Telegram/Web — they never poll on their own)
@@ -340,22 +375,42 @@ real ML deployment uses.
 > features will error or silently misbehave. Retrain, don't reuse an old
 > model file across a feature-set change.
 
-This fits a gradient-boosted classifier on 14 engineered features (RSI,
-MACD histogram, SMA ratio, ATR%, Bollinger-band position, short-term
-returns, volume ratio, realized volatility, and cyclical hour-of-day/
-day-of-week encodings — see `tradon/ml/features.py`) to predict whether
-price will be higher `--horizon` bars ahead, using a **chronological**
-train/test split (the most recent `--test-fraction` held out, never
-shuffled in — shuffling would let the model train on data from after the
-point it's graded on, which is look-ahead bias in disguise). It prints
-train/test accuracy next to the test period's majority-class baseline —
-if test accuracy doesn't beat that baseline, the model has no real edge
-on this data and printing a warning says so; don't enable it for trading
-just because a number came out. It also prints a feature-importance
-table (`GradientBoostingClassifier.feature_importances_`) so the model
-isn't a complete black box — if `hour_sin`/`dow_sin` dominate instead of
-`rsi_14`/`macd_hist`, that's a very different (and much more suspect)
-model than one actually driven by market structure.
+This fits a regularized `HistGradientBoostingClassifier` (shallow trees,
+slow learning rate, L2 penalty, early stopping on an internal validation
+split) on 14 engineered features (RSI, MACD histogram, SMA ratio, ATR%,
+Bollinger-band position, short-term returns, volume ratio, realized
+volatility, and cyclical hour-of-day/day-of-week encodings — see
+`tradon/ml/features.py`) to predict whether price will be higher
+`--horizon` bars ahead, using a **chronological** train/test split (the
+most recent `--test-fraction` held out, never shuffled in — shuffling
+would let the model train on data from after the point it's graded on,
+which is look-ahead bias in disguise). It prints train/test accuracy
+next to the test period's majority-class baseline — if test accuracy
+doesn't beat that baseline, the model has no real edge on this data and
+printing a warning says so; don't enable it for trading just because a
+number came out. It also prints a feature-importance table (permutation
+importance on the test split, clipped at 0 and normalized to sum to 1 —
+`HistGradientBoostingClassifier` has no built-in `feature_importances_`,
+unlike a plain tree ensemble) so the model isn't a complete black box —
+if `hour_sin`/`dow_sin` dominate instead of `rsi_14`/`macd_hist`, that's a
+very different (and much more suspect) model than one actually driven by
+market structure.
+
+**Why `HistGradientBoostingClassifier` and not a plain
+`GradientBoostingClassifier`**: confirmed live via a walk-forward
+comparison (retrain-from-scratch-per-fold, same method as
+`ml-walk-forward` below) against real Bybit BTCUSDT 1h history, trying
+four candidates — the previous default (unregularized
+`GradientBoostingClassifier`), a heavily regularized version of the same,
+this regularized `HistGradientBoostingClassifier`, and a scaled
+`LogisticRegression` — the unregularized default memorized its training
+window (98% train accuracy) and lost badly out-of-sample (chained Sharpe
+-6.45); every candidate still lost money out-of-sample, but this one
+overfit far less (73-81% train accuracy vs. 98%) and had the least-bad
+chained Sharpe of the four (-3.08, vs. -4.19/-4.78 for the other two
+regularized candidates). **This is a smaller honest loss, not a fix** —
+switching models reduces overfitting, it doesn't manufacture an edge that
+isn't in the data.
 
 **Multiple symbols**: pass a comma-separated `--symbol` list
 (`--symbol BTCUSDT,ETHUSDT`) to pool their history into one dataset, so
@@ -403,10 +458,12 @@ does:
 .venv/Scripts/tradon ml-walk-forward --symbol BTCUSDT --provider binance --timeframe 1h --limit 3000 --horizon 5 --splits 5
 ```
 
-Confirmed live against real Bybit history: a model whose single static
-split looked fine (53.0% test accuracy vs. 50.4% baseline) fell apart
-under walk-forward — only 1 of 4 retrained folds beat its own baseline,
-and the chained out-of-sample result was a loss (Sharpe -4.41). That gap
+Confirmed live against real Bybit BTCUSDT 1h history (3000 candles, 5
+folds) with the current regularized model: individual folds' own
+held-out test accuracy ranged 50.6%-76.2% against baselines of
+53.7%-65.5% — mixed, better in some folds than others — but the chained
+out-of-sample trading result across all folds was still a loss (PnL
+-859.90 on a 10000 balance, Sharpe -3.53, max drawdown 12.6%). That gap
 is exactly what this command exists to catch; tune thresholds by hand via
 `tradon backtest --strategy ml`, or retrain with a different `--horizon`.
 
@@ -437,16 +494,22 @@ test within one `backtest` call, so a number like that from `backtest`
 alone should not be trusted). A proper out-of-sample portfolio run (train
 `ml` only on the first 70% of history, then run all three strategies
 together on the strictly-later 30% only) against real Bybit BTCUSDT/ETHUSDT
-1h data gave a much less flattering, more honest picture: ML's test
-accuracy exactly matched the majority-class baseline (60.6%), and the
-combined shared-capital portfolio (sma_cross + rsi + ml, both symbols) lost
-money out-of-sample — PnL -320.85 on a 10000 balance, Sharpe -7.94, max
-drawdown 3.9%. Net takeaway: mixing `ml` into a portfolio backtest doesn't
-by itself fix the strategy's weak out-of-sample edge (see the walk-forward
-note above) — it just adds more combos competing for the same shared
-capital. Nothing here changed the engine (`simulate_portfolio`/`run_portfolio`
+1h data gave a much less flattering, more honest picture than the leaked
+number above — but also an unstable one across different 2-week test
+windows: one run (older window) lost money out-of-sample (PnL -320.85 on
+a 10000 balance, Sharpe -7.94); a later run (different, more recent test
+window — markets moved, so not a like-for-like rerun) came out slightly
+positive (PnL +118.11, Sharpe +2.63), driven almost entirely by one
+combo (ETHUSDT/ml, PF 2.48) while another (BTCUSDT/ml, PF 0.38) lost
+heavily in the same run. Net takeaway: mixing `ml` into a portfolio
+backtest doesn't reliably fix the strategy's weak out-of-sample edge (see
+the walk-forward note above) — results swing between clearly losing and
+mildly positive depending on which 2-week window you happen to test,
+which is itself evidence of no real edge rather than evidence of one.
+Nothing here changed the engine (`simulate_portfolio`/`run_portfolio`
 already supported this); this section exists so the leakage trap doesn't
-get rediscovered the hard way in this specific combo.
+get rediscovered the hard way in this specific combo, and so a single
+lucky window doesn't get mistaken for a fix.
 
 ## Tests
 
@@ -471,6 +534,10 @@ conftest.py) — no network calls, no real exchange/broker involved:
   test hit asyncio task re-entrancy errors specific to the test harness
   during manual exploration, and a flaky GUI test is worse than a
   narrower one that's actually reliable in CI.
+- `test_fallback_provider.py` — `FallbackProvider` against deliberately
+  failing/succeeding provider doubles (no network): falls through on
+  failure, remembers the active provider across calls, raises when every
+  provider fails, and delegates `subscribe_realtime` as-is.
 
 ## Notes
 

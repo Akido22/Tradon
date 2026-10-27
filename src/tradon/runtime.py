@@ -24,6 +24,7 @@ from tradon.config import load_app_config
 from tradon.data.base import Candle, DataProvider
 from tradon.data.binance import BinanceProvider
 from tradon.data.bybit import BybitProvider
+from tradon.data.fallback import FallbackProvider
 from tradon.data.yahoo import YahooProvider
 from tradon.db.models import Candle as CandleRow
 from tradon.db.models import SignalRecord, StrategyConfig
@@ -74,6 +75,7 @@ class RuntimeConfig:
     timeframe: str
     instruments: list[str]
     strategy_specs: list[dict] = field(default_factory=list)
+    fallback_providers: list[str] = field(default_factory=list)
     poll_interval_seconds: int = 60
     min_confirmations: int = 1
     confirmation_window_minutes: int = 5
@@ -92,6 +94,7 @@ def load_runtime_config() -> RuntimeConfig:
         timeframe=config.get("timeframe", "1h"),
         instruments=list(config.get("instruments", [])),
         strategy_specs=list(config.get("strategies", [])),
+        fallback_providers=list(config.get("fallback_providers", [])),
         poll_interval_seconds=int(config.get("poll_interval_seconds", 60)),
         min_confirmations=int(engine_cfg.get("min_confirmations", 1)),
         confirmation_window_minutes=int(engine_cfg.get("confirmation_window_minutes", 5)),
@@ -103,7 +106,19 @@ def load_runtime_config() -> RuntimeConfig:
 
 
 def build_provider(cfg: RuntimeConfig) -> DataProvider:
-    return PROVIDERS[cfg.provider_name]()
+    """Builds the configured provider, or a FallbackProvider chain over it
+    when `cfg.fallback_providers` is non-empty (config.yaml's
+    `fallback_providers:` list) — e.g. so Bybit going down doesn't stop
+    crypto signals if Binance still has the same symbol.
+    """
+    primary = PROVIDERS[cfg.provider_name]()
+    if not cfg.fallback_providers:
+        return primary
+    unknown = [name for name in cfg.fallback_providers if name not in PROVIDERS]
+    if unknown:
+        raise ValueError(f"Unknown fallback_providers: {', '.join(unknown)} — choices: {', '.join(PROVIDERS)}")
+    fallbacks = [PROVIDERS[name]() for name in cfg.fallback_providers]
+    return FallbackProvider([primary, *fallbacks])
 
 
 def describe_error(exc: Exception) -> str:

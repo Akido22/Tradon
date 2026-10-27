@@ -9,6 +9,15 @@
 provider: bybit
 timeframe: "1h"
 
+# If the primary provider's REST call fails (down, rate-limited, network
+# error), transparently retry with these providers in order instead of
+# failing the whole poll/backtest — only helps for symbols the fallback
+# actually serves (e.g. a Binance/Bybit crypto pair), not Forex symbols
+# unique to MetaTrader. Empty by default (no fallback). Example:
+# fallback_providers:
+#   - binance
+fallback_providers: []
+
 # Default instruments — override per-run with `tradon run --symbols BTCUSDT,ETHUSDT`.
 instruments:
   - BTCUSDT

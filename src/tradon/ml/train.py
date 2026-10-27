@@ -16,7 +16,8 @@ from pathlib import Path
 from typing import Any
 
 import joblib
-from sklearn.ensemble import GradientBoostingClassifier
+from sklearn.ensemble import HistGradientBoostingClassifier
+from sklearn.inspection import permutation_importance
 from sklearn.metrics import accuracy_score
 
 from tradon.backtest import BacktestResult, run_backtest
@@ -41,6 +42,25 @@ class TrainingReport:
     # "hour_sin"/"dow_sin" dominate, that's a very different (and much
     # more suspect) model than one driven by rsi_14/macd_hist.
     feature_importances: tuple[tuple[str, float], ...]
+
+
+def _normalized_permutation_importances(
+    model: Any, x_test: list[list[float]], y_test: list[int]
+) -> list[tuple[str, float]]:
+    """HistGradientBoostingClassifier has no built-in `feature_importances_`
+    (unlike tree-ensemble models such as GradientBoostingClassifier), so
+    importance is measured instead by how much held-out test accuracy
+    drops when a feature's values are shuffled — permutation_importance,
+    evaluated on the test split so it reflects generalization, not fit.
+    A shuffled-but-useless feature can score slightly negative (shuffling
+    it occasionally helps by luck); those are clipped to 0 so every value
+    sums to 1 like the old feature_importances_-based report did.
+    """
+    result = permutation_importance(model, x_test, y_test, n_repeats=10, random_state=0)
+    clipped = [max(0.0, float(v)) for v in result.importances_mean]
+    total = sum(clipped)
+    normalized = [v / total if total > 0 else 0.0 for v in clipped]
+    return list(zip(FEATURE_NAMES, normalized, strict=True))
 
 
 def build_dataset(candles: list[Candle], horizon: int) -> tuple[list[list[float]], list[int]]:
@@ -123,18 +143,23 @@ def train_model_multi(
     if len(set(y_test)) < 2:
         raise ValueError("Test split has only one outcome — try a smaller --test-fraction or more --limit")
 
-    model = GradientBoostingClassifier(random_state=0)
+    # Regularized (shallow, slow, L2-penalized, early-stopped) rather than
+    # scikit-learn's unregularized defaults — a plain GradientBoostingClassifier
+    # memorized its training window (98% train accuracy) and lost badly
+    # out-of-sample on a live walk-forward comparison (chained Sharpe
+    # -6.45); this config still doesn't turn a profit out-of-sample either,
+    # but overfits far less and had the best (least negative) Sharpe of
+    # four candidates tried. See README's ML section for the numbers.
+    model = HistGradientBoostingClassifier(
+        random_state=0, max_depth=3, learning_rate=0.05, l2_regularization=1.0, early_stopping=True
+    )
     model.fit(x_train, y_train)
 
     train_accuracy = accuracy_score(y_train, model.predict(x_train))
     test_accuracy = accuracy_score(y_test, model.predict(x_test))
     majority_class = max(set(y_test), key=y_test.count)
     baseline_accuracy = y_test.count(majority_class) / len(y_test)
-    importances = sorted(
-        zip(FEATURE_NAMES, (float(v) for v in model.feature_importances_), strict=True),
-        key=lambda pair: pair[1],
-        reverse=True,
-    )
+    importances = tuple(sorted(_normalized_permutation_importances(model, x_test, y_test), key=lambda p: p[1], reverse=True))
 
     report = TrainingReport(
         samples=total_samples,
