@@ -104,6 +104,8 @@ async def _run(once: bool, symbols_csv: str | None, provider_name: str | None, t
     signal_engine = build_signal_engine(cfg)
     risk_manager = build_risk_manager(cfg)
 
+    _render_run_config(cfg, provider, strategies)
+
     if once:
         signals = await poll_once(
             provider, cfg.instruments, cfg.timeframe, strategies, signal_engine,
@@ -654,6 +656,36 @@ def _render_correlation_matrix(candles_by_symbol: dict) -> None:
         "[dim]Near +1 = moves together (running the same directional strategy on both isn't real "
         "diversification); near -1 = moves opposite; near 0 = unrelated.[/dim]"
     )
+
+
+def _render_run_config(cfg, provider, strategies) -> None:
+    """Prints what's actually about to run — provider (+ fallback chain),
+    timeframe, instruments, and every active strategy with its params —
+    so `tradon run` doesn't start monitoring silently with the caller
+    having to go read config.yaml to know what's live.
+    """
+    provider_label = cfg.provider_name
+    if cfg.fallback_providers:
+        provider_label += f" (fallback: {', '.join(cfg.fallback_providers)})"
+
+    table = Table(title="Monitoring configuration")
+    table.add_column("Setting")
+    table.add_column("Value")
+    table.add_row("Provider", provider_label)
+    table.add_row("Timeframe", cfg.timeframe)
+    table.add_row("Instruments", ", ".join(cfg.instruments))
+    if strategies:
+        table.add_row("Strategies", "\n".join(_describe_strategy(s) for s in strategies))
+    else:
+        table.add_row("Strategies", "[red]none enabled — no signals will ever fire[/red]")
+    console.print(table)
+
+
+def _describe_strategy(strategy) -> str:
+    if not strategy.params:
+        return strategy.name
+    params = ", ".join(f"{k}={v}" for k, v in strategy.params.items())
+    return f"{strategy.name} ({params})"
 
 
 def _render(signals) -> None:

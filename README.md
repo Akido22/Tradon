@@ -76,6 +76,13 @@ another thin caller against `runtime.py`, not touching this module.
    .venv/Scripts/tradon symbols                        # list symbols from the configured provider
    ```
 
+   Every `run` prints a "Monitoring configuration" banner first — provider
+   (and fallback chain, if any), timeframe, instruments, and every
+   *enabled* strategy with its params — before polling starts, so you
+   never have to go re-read `config.yaml` to know what's actually live.
+   If it says "none enabled", `strategies:` in `config.yaml` has nothing
+   turned on and no signal will ever fire no matter how long you wait.
+
 5. **Run the GUI** (optional — needs the `gui` extra):
 
    ```bash

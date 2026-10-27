@@ -65,6 +65,18 @@ def test_run_once_renders_signals_table(fake_provider) -> None:
     assert "Signals" in result.output
 
 
+def test_run_once_renders_startup_config_banner(fake_provider) -> None:
+    result = runner.invoke(app, ["run", "--once", "--provider", "fake", "--symbols", SYMBOL])
+
+    assert result.exit_code == 0, result.output
+    assert "Monitoring configuration" in result.output
+    assert "fake" in result.output
+    assert SYMBOL in result.output
+    # Whatever strategies are enabled in config.yaml should be named, not
+    # left for the caller to go look up — sma_cross is enabled by default.
+    assert "sma_cross" in result.output
+
+
 def test_run_reports_clean_error_for_unsupported_symbol(fake_provider) -> None:
     result = runner.invoke(app, ["run", "--once", "--provider", "fake", "--symbols", "NOTREAL"])
 
